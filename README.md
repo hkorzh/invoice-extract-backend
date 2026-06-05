@@ -1,0 +1,80 @@
+# Invoice Extractor API
+
+A small FastAPI service that turns an invoice — image or PDF — into structured,
+typed JSON, using Google Gemini's multimodal model.
+
+**Live demo:** [your-demo-url] · **Frontend repo:** [link-to-frontend-repo]
+
+## What it does
+
+Upload an invoice file and get back a predictable JSON object:
+
+```json
+{
+  "vendor": "Acme Supplies Ltd",
+  "date": "2026-03-14",
+  "line_items": [
+    { "description": "Widget A", "quantity": 10, "unit_price": 4.50, "amount": 45.00 }
+  ],
+  "subtotal": 45.00,
+  "total": 49.50
+}
+```
+
+The model is constrained to a **fixed schema**, so every response has the same shape —
+fields land in the same place every time, ready to pipe into a database, an accounting
+system, or a spreadsheet. That predictability is the whole point: it's the difference
+between an extraction tool and pasting a document into a chatbot.
+
+## Stack
+
+- **FastAPI** + **Uvicorn** — the API
+- **Pydantic** — the schema, passed directly to the model as its response schema
+- **google-genai** — Gemini client (`gemini-2.5-flash`, multimodal: reads images and PDFs)
+
+## How it works
+
+The uploaded file is sent to Gemini alongside the Pydantic `Invoice` schema as a
+structured-output constraint. Gemini returns JSON that already matches that schema,
+which FastAPI validates and serves. Fields that aren't present in the document come
+back as `null` rather than invented — the model is explicitly instructed not to guess.
+
+## Run locally
+
+```bash
+git clone [this-repo]
+cd [repo-folder]
+python3 -m venv .venv
+source .venv/bin/activate          # Windows: .venv\Scripts\activate
+pip install -r requirements.txt
+export GEMINI_API_KEY=your_key     # free key at aistudio.google.com
+uvicorn main:app --reload
+```
+
+Then open <http://127.0.0.1:8000/docs> and try `POST /extract`.
+
+## Endpoints
+
+| Method | Path       | Description                                                          |
+| ------ | ---------- | -------------------------------------------------------------------- |
+| `GET`  | `/`        | Health check                                                         |
+| `POST` | `/extract` | Multipart file upload (PNG, JPEG, WebP, PDF) → structured `Invoice` JSON |
+
+## Configuration
+
+| Variable         | Required | Description                                                        |
+| ---------------- | -------- | ------------------------------------------------------------------ |
+| `GEMINI_API_KEY` | yes      | Google AI Studio key. Kept server-side; never exposed to the client. |
+
+## Scope
+
+Deliberately focused: one document type, one fixed schema, one model. The goal is a
+clean, reliable demonstration of LLM-into-app integration — not a full product.
+
+## Deployment
+
+Runs on Render's free tier. Start command:
+
+```bash
+uvicorn main:app --host 0.0.0.0 --port $PORT
+```
