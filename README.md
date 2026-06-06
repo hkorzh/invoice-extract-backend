@@ -3,7 +3,8 @@
 A small FastAPI service that turns an invoice — image or PDF — into structured,
 typed JSON, using Google Gemini's multimodal model.
 
-**Live demo:** [your-demo-url] · **Frontend repo:** [link-to-frontend-repo]
+**Live demo:** [invoice-extract-frontend-zeta.vercel.app/](https://invoice-extract-frontend-zeta.vercel.app/)· 
+**Frontend repo:** [github.com/hkorzh/invoice-extract-frontend](https://github.com/hkorzh/invoice-extract-frontend)
 
 ## What it does
 
@@ -14,10 +15,12 @@ Upload an invoice file and get back a predictable JSON object:
   "vendor": "Acme Supplies Ltd",
   "date": "2026-03-14",
   "line_items": [
-    { "description": "Widget A", "quantity": 10, "unit_price": 4.50, "amount": 45.00 }
+    { 
+        "description": "Widget A", "quantity": 10, "unit_price": 4.50, "amount": 45.00, "tax_percent": 20 }
   ],
   "subtotal": 45.00,
-  "total": 49.50
+  "total": 45.00,
+  "total_tax": 49.00,
 }
 ```
 
@@ -47,7 +50,7 @@ cd [repo-folder]
 python3 -m venv .venv
 source .venv/bin/activate          # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
-export GEMINI_API_KEY=your_key     # free key at aistudio.google.com
+export GOO_KEY=your_key     # free key at aistudio.google.com
 uvicorn main:app --reload
 ```
 
@@ -64,7 +67,7 @@ Then open <http://127.0.0.1:8000/docs> and try `POST /extract`.
 
 | Variable         | Required | Description                                                        |
 | ---------------- | -------- | ------------------------------------------------------------------ |
-| `GEMINI_API_KEY` | yes      | Google AI Studio key. Kept server-side; never exposed to the client. |
+| `GOO_KEY` | yes      | Google AI Studio key. Kept server-side; never exposed to the client. |
 
 ## Scope
 
