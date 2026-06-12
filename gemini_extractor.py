@@ -10,7 +10,7 @@ import os
 
 from dotenv import load_dotenv
 from google import genai
-from google.genai import types
+from google.genai import errors, types
 
 from schemas import Invoice
 
@@ -47,8 +47,11 @@ def extract_invoice(file_bytes: bytes, mime_type: str) -> Invoice:
                 response_schema=Invoice,
             ),
         )
+    except errors.APIError as e:
+        # APIError stringifies to the full JSON payload; .message is the clean part.
+        raise RuntimeError(f"Gemini call failed: {e.message}") from e
     except Exception as e:
-        raise RuntimeError(f"Gemini call failed: {e}")
+        raise RuntimeError(f"Gemini call failed: {e}") from e
 
     # response.parsed is already a typed Invoice instance.
     invoice = response.parsed
