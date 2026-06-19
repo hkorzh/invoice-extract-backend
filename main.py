@@ -1,8 +1,10 @@
+import json
+
 from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 
-from schemas import Invoice
-from gemini_extractor import extract_invoice
+from gemini_extractor import extract_invoice_stream
 
 
 ACCEPTED = {"image/png", "image/jpeg", "image/webp", "application/pdf"}
@@ -25,7 +27,7 @@ def health():
     return {"status": "ok"}
 
 
-@app.post("/extract", response_model=Invoice)
+@app.post("/extract")
 async def extract(file: UploadFile = File(...)):
     if file.content_type not in ACCEPTED:
         raise HTTPException(
@@ -35,7 +37,8 @@ async def extract(file: UploadFile = File(...)):
 
     file_bytes = await file.read()
 
-    try:
-        return extract_invoice(file_bytes, file.content_type)
-    except RuntimeError as e:
-        raise HTTPException(status_code=502, detail=str(e))
+    def stream():
+        for update in extract_invoice_stream(file_bytes, file.content_type):
+            yield json.dumps(update) + "\n"
+
+    return StreamingResponse(stream(), media_type="application/x-ndjson")
