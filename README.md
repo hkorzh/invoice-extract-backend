@@ -58,10 +58,11 @@ Then open <http://127.0.0.1:8000/docs> and try `POST /extract`.
 
 ## Endpoints
 
-| Method | Path       | Description                                                          |
-| ------ | ---------- | -------------------------------------------------------------------- |
-| `GET`  | `/`        | Health check                                                         |
-| `POST` | `/extract` | Multipart file upload (PNG, JPEG, WebP, PDF) → structured `Invoice` JSON |
+| Method | Path            | Description                                                          |
+| ------ | --------------- | -------------------------------------------------------------------- |
+| `GET`  | `/`             | Health check                                                         |
+| `POST` | `/extract`      | Multipart file upload (PNG, JPEG, WebP, PDF) → NDJSON stream of `extracting` / `retrying` / `finished` / `error` updates; `finished` carries the `Invoice` |
+| `POST` | `/extract/live` | Same upload → NDJSON stream that also reports Gemini's progress: `waiting`, `thinking` (with a thought summary), `writing`, then `retrying` / `finished` / `error` |
 
 ## Configuration
 
