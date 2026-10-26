@@ -63,12 +63,16 @@ Then open <http://127.0.0.1:8000/docs> and try `POST /extract`.
 | `GET`  | `/`             | Health check                                                         |
 | `POST` | `/extract`      | Multipart file upload (PNG, JPEG, WebP, PDF) → NDJSON stream of `extracting` / `retrying` / `finished` / `error` updates; `finished` carries the `Invoice` |
 | `POST` | `/extract/live` | Same upload → NDJSON stream that also reports Gemini's progress: `waiting`, `thinking` (with a thought summary), `writing`, then `retrying` / `finished` / `error` |
+| `POST` | `/extract/batch` | Multipart upload of several `files` → one NDJSON stream; files are uploaded to the Gemini Files API and extracted concurrently. Every update carries `file` (index) and `filename`; statuses are `queued`, `uploading`, `uploaded`, then the `/extract/live` ones. Ends with `done` and `finished` / `failed` counts |
 
 ## Configuration
 
 | Variable         | Required | Description                                                        |
 | ---------------- | -------- | ------------------------------------------------------------------ |
 | `GOO_KEY` | yes      | Google AI Studio key. Kept server-side; never exposed to the client. |
+| `GEMINI_MAX_RETRIES` | no | Attempts per Gemini call before giving up (default 3). |
+| `GEMINI_MAX_CONCURRENCY` | no | Batch files processed at once, shared across requests (default 3). |
+| `MAX_BATCH_FILES` | no | Most files accepted by `/extract/batch` (default 10). |
 
 ## Scope
 

@@ -1,13 +1,20 @@
 import json
+import os
 
 from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 
-from gemini_extractor import extract_invoice_live, extract_invoice_stream
+from gemini_extractor import (
+    UploadedDocument,
+    extract_invoice_live,
+    extract_invoice_stream,
+    extract_invoices_batch,
+)
 
 
 ACCEPTED = {"image/png", "image/jpeg", "image/webp", "application/pdf"}
+MAX_FILES = int(os.getenv("MAX_BATCH_FILES", "10"))
 
 
 # --- App ---
@@ -36,10 +43,11 @@ def _check_type(file: UploadFile):
 
 
 def _ndjson(updates):
-    return StreamingResponse(
-        (json.dumps(update) + "\n" for update in updates),
-        media_type="application/x-ndjson",
-    )
+    async def lines():
+        async for update in updates:
+            yield json.dumps(update) + "\n"
+
+    return StreamingResponse(lines(), media_type="application/x-ndjson")
 
 
 @app.post("/extract")
@@ -56,3 +64,21 @@ async def extract_live(file: UploadFile = File(...)):
     _check_type(file)
     file_bytes = await file.read()
     return _ndjson(extract_invoice_live(file_bytes, file.content_type))
+
+
+@app.post("/extract/batch")
+async def extract_batch(files: list[UploadFile] = File(...)):
+    """Files are processed concurrently; every update carries "file" (index) and "filename".
+
+    Per-file statuses: queued, uploading, uploaded, waiting, thinking, writing, retrying,
+    finished, error. The stream ends with "done" and finished/failed counts.
+    """
+    if len(files) > MAX_FILES:
+        raise HTTPException(status_code=413, detail=f"Send at most {MAX_FILES} files at once.")
+    for file in files:
+        _check_type(file)
+    documents = [
+        UploadedDocument(filename=file.filename or f"file-{i}", data=await file.read(), mime_type=file.content_type)
+        for i, file in enumerate(files)
+    ]
+    return _ndjson(extract_invoices_batch(documents))
