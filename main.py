@@ -14,7 +14,7 @@ from gemini_extractor import (
 
 
 ACCEPTED = {"image/png", "image/jpeg", "image/webp", "application/pdf"}
-MAX_FILES = int(os.getenv("MAX_BATCH_FILES", "10"))
+MAX_FILES = int(os.getenv("MAX_BATCH_FILES", "5"))
 
 
 # --- App ---

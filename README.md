@@ -72,7 +72,7 @@ Then open <http://127.0.0.1:8000/docs> and try `POST /extract`.
 | `GOO_KEY` | yes      | Google AI Studio key. Kept server-side; never exposed to the client. |
 | `GEMINI_MAX_RETRIES` | no | Attempts per Gemini call before giving up (default 3). |
 | `GEMINI_MAX_CONCURRENCY` | no | Batch files processed at once, shared across requests (default 3). |
-| `MAX_BATCH_FILES` | no | Most files accepted by `/extract/batch` (default 10). |
+| `MAX_BATCH_FILES` | no | Most files accepted by `/extract/batch` (default 5). |
 
 ## Scope
 
