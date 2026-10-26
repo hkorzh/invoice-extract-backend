@@ -22,6 +22,9 @@ class LineItem(BaseModel):
 class Invoice(BaseModel):
     vendor: Optional[str] = Field(None, description="Company that issued the invoice")
     date: Optional[str] = Field(None, description="Invoice date exactly as printed")
+    currency: Optional[str] = Field(
+        None, description="ISO 4217 code of the invoice amounts (e.g. USD, EUR), if the document indicates it"
+    )
     line_items: list[LineItem] = Field(default_factory=list)
     subtotal: Optional[float] = Field(None, description="Sum before tax")
     total_tax: Optional[float] = Field(None, description="Total tax")
