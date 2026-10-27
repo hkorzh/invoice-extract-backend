@@ -12,7 +12,9 @@ be processed concurrently without blocking the event loop.
 
 import asyncio
 import io
+import math
 import os
+import re
 from dataclasses import dataclass
 from enum import Enum
 from typing import AsyncIterator, Optional, TypedDict, Union
@@ -52,7 +54,55 @@ PROMPT = (
 )
 
 
+def _retry_delay_seconds(e: errors.APIError) -> Optional[float]:
+    """How long Google asks us to wait before retrying, if it says."""
+    # The structured RetryInfo detail carries it as e.g. "46639s".
+    error = e.details.get("error", {}) if isinstance(e.details, dict) else {}
+    for detail in error.get("details", []):
+        if detail.get("@type", "").endswith("google.rpc.RetryInfo"):
+            delay = detail.get("retryDelay", "")
+            try:
+                return float(delay.rstrip("s"))
+            except ValueError:
+                pass
+    # Fall back to the human text: "Please retry in 12h57m19.93s."
+    match = re.search(r"retry in ((?:\d+h)?(?:\d+m)?(?:[\d.]+s)?)", e.message or "")
+    if not match or not match.group(1):
+        return None
+    units = {"h": 3600, "m": 60, "s": 1}
+    return sum(float(value) * units[unit] for value, unit in re.findall(r"([\d.]+)([hms])", match.group(1)))
+
+
+def _humanize(seconds: float) -> str:
+    """46639 -> "12 hours 58 minutes", 75 -> "2 minutes", 9.3 -> "10 seconds"."""
+    seconds = math.ceil(seconds)
+
+    def plural(n: int, word: str) -> str:
+        return f"{n} {word}" if n == 1 else f"{n} {word}s"
+
+    if seconds < 60:
+        return plural(seconds, "second")
+    minutes = math.ceil(seconds / 60)
+    hours, minutes = divmod(minutes, 60)
+    if not hours:
+        return plural(minutes, "minute")
+    if not minutes:
+        return plural(hours, "hour")
+    return f"{plural(hours, 'hour')} {plural(minutes, 'minute')}"
+
+
+class QuotaExceeded(RuntimeError):
+    """Gemini rejected the call for quota; retry_after is the wait in seconds, if known."""
+
+    def __init__(self, retry_after: Optional[float]):
+        when = f"in {_humanize(retry_after)}" if retry_after else "later"
+        super().__init__(f"The free Gemini usage limit has been reached. Please try again {when}.")
+        self.retry_after = retry_after
+
+
 def _gemini_error(e: Exception) -> RuntimeError:
+    if isinstance(e, errors.APIError) and e.code == 429:
+        return QuotaExceeded(_retry_delay_seconds(e))
     # APIError stringifies to the full JSON payload; .message is the clean part.
     message = e.message if isinstance(e, errors.APIError) else str(e)
     return RuntimeError(f"Gemini call failed: {message}")
@@ -143,8 +193,16 @@ class ThoughtPayload(TypedDict):
     thought: str
 
 
-class ErrorPayload(TypedDict):
+class ErrorPayload(TypedDict, total=False):
     error: Optional[str]
+    retry_after: float  # only on quota errors: seconds until Gemini accepts calls again
+
+
+def _error_payload(error: Optional[RuntimeError]) -> ErrorPayload:
+    payload: ErrorPayload = {"error": str(error) if error else None}
+    if isinstance(error, QuotaExceeded) and error.retry_after is not None:
+        payload["retry_after"] = error.retry_after
+    return payload
 
 
 class CurrencyTotal(TypedDict):
@@ -181,11 +239,13 @@ async def _extract_live(document: types.Part) -> AsyncIterator[StatusUpdate]:
                 payload: Payload = {"thought": progress.thought} if progress.thought else None
                 yield {"status": progress.stage.value, "payload": payload}
         except RuntimeError as e:
-            last_error = str(e)
+            last_error = e
+            if isinstance(e, QuotaExceeded):
+                break  # Retrying can't succeed before the quota resets.
             if attempt < MAX_RETRIES:
                 yield {"status": "retrying", "payload": None}
 
-    yield {"status": "error", "payload": {"error": last_error}}
+    yield {"status": "error", "payload": _error_payload(last_error)}
 
 
 async def extract_invoice_stream(file_bytes: bytes, mime_type: str) -> AsyncIterator[StatusUpdate]:
@@ -202,14 +262,16 @@ async def extract_invoice_stream(file_bytes: bytes, mime_type: str) -> AsyncIter
         try:
             invoice = await _call_gemini(document)
         except RuntimeError as e:
-            last_error = str(e)
+            last_error = e
+            if isinstance(e, QuotaExceeded):
+                break  # Retrying can't succeed before the quota resets.
             if attempt < MAX_RETRIES:
                 yield {"status": "retrying", "payload": None}
             continue
         yield {"status": "finished", "payload": invoice}
         return
 
-    yield {"status": "error", "payload": {"error": last_error}}
+    yield {"status": "error", "payload": _error_payload(last_error)}
 
 
 async def extract_invoice_live(file_bytes: bytes, mime_type: str) -> AsyncIterator[StatusUpdate]:
@@ -266,14 +328,16 @@ async def _upload_with_retries(document: UploadedDocument) -> AsyncIterator[Uplo
         try:
             uploaded = await _upload(document)
         except RuntimeError as e:
-            last_error = str(e)
+            last_error = e
+            if isinstance(e, QuotaExceeded):
+                break  # Retrying can't succeed before the quota resets.
             if attempt < MAX_RETRIES:
                 yield {"status": "retrying", "payload": None}
             continue
         yield {"status": "uploaded", "payload": None, "file": uploaded}
         return
 
-    yield {"status": "error", "payload": {"error": last_error}}
+    yield {"status": "error", "payload": _error_payload(last_error)}
 
 
 async def _process_document(document: UploadedDocument) -> AsyncIterator[StatusUpdate]:
