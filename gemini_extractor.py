@@ -371,7 +371,7 @@ async def extract_invoices_batch(
         for task in tasks:
             task.cancel()
 
-    finished = sum([result for result in results if result["status"] == "finished"])
+    finished = sum([1 for result in results if result["status"] == "finished"])
     invoices = [result["payload"] for result in results if isinstance(result["payload"], Invoice)]
     yield {
         "status": "done", 
