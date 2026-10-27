@@ -45,7 +45,8 @@ def _check_type(file: UploadFile):
 def _ndjson(updates):
     async def lines():
         async for update in updates:
-            yield json.dumps(update) + "\n"
+            # Payloads may hold pydantic models (the Invoice); dump those as plain JSON.
+            yield json.dumps(update, default=lambda model: model.model_dump()) + "\n"
 
     return StreamingResponse(lines(), media_type="application/x-ndjson")
 

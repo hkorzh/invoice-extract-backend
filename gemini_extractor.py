@@ -15,7 +15,7 @@ import io
 import os
 from dataclasses import dataclass
 from enum import Enum
-from typing import AsyncIterator, Optional
+from typing import AsyncIterator, Optional, TypedDict, Union
 
 from dotenv import load_dotenv
 from google import genai
@@ -139,16 +139,46 @@ async def _iterate_gemini(document: types.Part) -> AsyncIterator[GeminiProgress]
     yield GeminiProgress(GeminiStage.DONE, invoice=invoice)
 
 
-async def _extract_live(document: types.Part) -> AsyncIterator[dict]:
+class ThoughtPayload(TypedDict):
+    thought: str
+
+
+class ErrorPayload(TypedDict):
+    error: Optional[str]
+
+
+class CurrencyTotal(TypedDict):
+    currency: Optional[str]  # None when the invoices didn't state one
+    amount: float
+
+
+class BatchSummary(TypedDict):
+    finished: int
+    failed: int
+    totals: list[CurrencyTotal]
+
+
+# "thinking" carries a ThoughtPayload, "finished" the Invoice, "error" an
+# ErrorPayload, the batch's final "done" a BatchSummary; every other status None.
+Payload = Union[ThoughtPayload, Invoice, ErrorPayload, BatchSummary, None]
+
+
+class StatusUpdate(TypedDict):
+    """One untagged progress update of a file's pipeline."""
+    status: str
+    payload: Payload
+
+
+async def _extract_live(document: types.Part) -> AsyncIterator[StatusUpdate]:
     """Drive the streamed Gemini call with retries; see extract_invoice_live()."""
     last_error = None
     for attempt in range(1, MAX_RETRIES + 1):
         try:
             async for progress in _iterate_gemini(document):
                 if progress.stage is GeminiStage.DONE:
-                    yield {"status": "finished", "payload": progress.invoice.model_dump()}
+                    yield {"status": "finished", "payload": progress.invoice}
                     return
-                payload = {"thought": progress.thought} if progress.thought else None
+                payload: Payload = {"thought": progress.thought} if progress.thought else None
                 yield {"status": progress.stage.value, "payload": payload}
         except RuntimeError as e:
             last_error = str(e)
@@ -158,7 +188,7 @@ async def _extract_live(document: types.Part) -> AsyncIterator[dict]:
     yield {"status": "error", "payload": {"error": last_error}}
 
 
-async def extract_invoice_stream(file_bytes: bytes, mime_type: str) -> AsyncIterator[dict]:
+async def extract_invoice_stream(file_bytes: bytes, mime_type: str) -> AsyncIterator[StatusUpdate]:
     """Drive the Gemini call with retries, yielding progress updates.
 
     Each yielded dict has a "status" of "extracting", "retrying", "finished",
@@ -176,13 +206,13 @@ async def extract_invoice_stream(file_bytes: bytes, mime_type: str) -> AsyncIter
             if attempt < MAX_RETRIES:
                 yield {"status": "retrying", "payload": None}
             continue
-        yield {"status": "finished", "payload": invoice.model_dump()}
+        yield {"status": "finished", "payload": invoice}
         return
 
     yield {"status": "error", "payload": {"error": last_error}}
 
 
-async def extract_invoice_live(file_bytes: bytes, mime_type: str) -> AsyncIterator[dict]:
+async def extract_invoice_live(file_bytes: bytes, mime_type: str) -> AsyncIterator[StatusUpdate]:
     """Like extract_invoice_stream(), but streams Gemini's own progress.
 
     Each yielded dict has a "status" of "waiting", "thinking", "writing",
@@ -218,7 +248,17 @@ async def _upload(document: UploadedDocument) -> types.File:
         raise _gemini_error(e) from e
 
 
-async def _upload_with_retries(document: UploadedDocument) -> AsyncIterator[dict]:
+class UploadUpdate(StatusUpdate, total=False):
+    file: types.File  # only on "uploaded"
+
+
+class FileUpdate(StatusUpdate):
+    """A StatusUpdate tagged with the file of the batch it belongs to."""
+    file: int
+    filename: str
+
+
+async def _upload_with_retries(document: UploadedDocument) -> AsyncIterator[UploadUpdate]:
     """Yields "uploading" / "retrying", then "uploaded" carrying the File, or "error"."""
     last_error = None
     for attempt in range(1, MAX_RETRIES + 1):
@@ -236,7 +276,7 @@ async def _upload_with_retries(document: UploadedDocument) -> AsyncIterator[dict
     yield {"status": "error", "payload": {"error": last_error}}
 
 
-async def _process_document(document: UploadedDocument) -> AsyncIterator[dict]:
+async def _process_document(document: UploadedDocument) -> AsyncIterator[StatusUpdate]:
     """One file's pipeline: upload, then extract. Yields untagged status updates."""
     uploaded = None
     try:
@@ -260,37 +300,60 @@ async def _process_document(document: UploadedDocument) -> AsyncIterator[dict]:
                 pass
 
 
-async def _run_document(index: int, document: UploadedDocument, queue: asyncio.Queue) -> bool:
+async def _run_document(
+    index: int, document: UploadedDocument, queue: asyncio.Queue[Optional[FileUpdate]]
+) -> bool:
     """Run one file's pipeline under a concurrency slot, tagging every update.
 
     Returns True when the file ended "finished".
     """
     tag = {"file": index, "filename": document.filename}
-    last_status = None
+    last = None
     # Reported before waiting for a slot, so files behind others aren't silent.
     await queue.put({**tag, "status": "queued", "payload": None})
     async with _slots:
         try:
             async for update in _process_document(document):
-                last_status = update["status"]
-                await queue.put({**tag, **update})
+                last = {**tag, **update}
+                await queue.put(last)
         except Exception as e:
             # Anything unexpected still has to close this file's stream.
-            last_status = "error"
-            await queue.put({**tag, "status": "error", "payload": {"error": str(e)}})
-    return last_status == "finished"
+            last = {**tag, "status": "error", "payload": {"error": str(e)}}
+            await queue.put(last)
+    last.update({"status": "finished"})
+    return last
 
 
-async def extract_invoices_batch(documents: list[UploadedDocument]) -> AsyncIterator[dict]:
+def _totals_by_currency(invoices: list[Invoice]) -> list[CurrencyTotal]:
+    """Sum the invoices' amounts due per currency, in order of first appearance.
+
+    An invoice counts with its total_with_tax, or its total when that is missing;
+    invoices with neither are left out.
+    """
+    sums: dict[Optional[str], float] = {}
+    for invoice in invoices:
+        amount = invoice.total_with_tax if invoice.total_with_tax is not None else invoice.total
+        if amount is None:
+            continue
+        sums[invoice.currency] = sums.get(invoice.currency, 0.0) + amount
+    # Floats drift when summed (0.1 + 0.2); amounts are money, so keep cents.
+    return [{"currency": currency, "amount": round(amount, 2)} for currency, amount in sums.items()]
+
+
+async def extract_invoices_batch(
+    documents: list[UploadedDocument],
+) -> AsyncIterator[Union[FileUpdate, StatusUpdate]]:
     """Process several files concurrently, yielding their updates as they happen.
 
     Every per-file update carries "file" (its index in the request) and
     "filename", plus the same "status"/"payload" as extract_invoice_live(),
     with "queued", "uploading" and "uploaded" coming before the extraction
     statuses.
-    The last update is {"status": "done", "payload": {"finished": n, "failed": m}}.
+    The last update is {"status": "done", "payload": {"finished": n, "failed": m,
+    "totals": [{"currency": "USD", "amount": 200.0}, ...]}}, totals summed over
+    the finished invoices (see _totals_by_currency()).
     """
-    queue: asyncio.Queue = asyncio.Queue()
+    queue: asyncio.Queue[Optional[FileUpdate]] = asyncio.Queue()
     tasks = [
         asyncio.create_task(_run_document(index, document, queue))
         for index, document in enumerate(documents)
@@ -308,5 +371,14 @@ async def extract_invoices_batch(documents: list[UploadedDocument]) -> AsyncIter
         for task in tasks:
             task.cancel()
 
-    finished = sum(results)
-    yield {"status": "done", "payload": {"finished": finished, "failed": len(results) - finished}}
+    finished = sum([result for result in results if result["status"] == "finished"])
+    invoices = [result["payload"] for result in results if isinstance(result["payload"], Invoice)]
+    yield {
+        "status": "done", 
+        "payload": {
+            "finished": finished, 
+            "failed": len(results) - finished, 
+            "items": results,
+            "totals": _totals_by_currency(invoices),
+        }
+    }
